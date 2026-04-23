@@ -2,7 +2,7 @@ import sqlite3
 from better_profanity import profanity
 
 
-API_TOKEN = "8397741728:AAHkiT4YZxFKMbydL7P02WMVNiRLfM5tsys"   # Токен бота
+API_TOKEN = ""   # Токен бота
 MUTE_MINUTES = 10                                 # Время мута в минутах
 WARN_LIMIT = 3                                    # Предупреждений до мута
 DB_NAME = "moderator.db"                          # Имя файла базы данных
