@@ -1,0 +1,223 @@
+import asyncio
+from datetime import datetime
+from aiogram import Bot, Dispatcher
+from aiogram.filters import Command
+from aiogram.enums import ChatMemberStatus
+from aiogram.types import Message
+
+from config import API_TOKEN, MUTE_MINUTES, WARN_LIMIT, OWNER_ID
+import logic
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+# ---------- ПРОВЕРКА ПРАВ ----------
+async def is_admin_or_owner(chat_id: int, user_id: int) -> bool:
+    if user_id == OWNER_ID:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR)
+    except:
+        return False
+
+# ---------- ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЯ ----------
+async def get_target_user(message: Message):
+    if message.reply_to_message:
+        user = message.reply_to_message.from_user
+        return user.id, user.first_name
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return None, None
+    try:
+        tg_id = int(args[1])
+        try:
+            chat = await bot.get_chat(tg_id)
+            name = chat.first_name
+        except:
+            name = str(tg_id)
+        return tg_id, name
+    except ValueError:
+        await message.reply("❌ Неверный формат. Используйте ответ на сообщение или числовой ID.")
+        return None, None
+
+# ---------- /START ----------
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        "🤖 *Модератор-бот*\n\n"
+        "Команды для администраторов и владельца:\n"
+        "/warn [@user/ID] – выдать предупреждение\n"
+        "/warns [@user/ID] – показать количество предупреждений\n"
+        "/mute [@user/ID] [минуты] – мут (по умолчанию 10 мин)\n"
+        "/unmute [@user/ID] – снять мут\n"
+        "/ban [@user/ID] [минуты] – бан (без времени – навсегда)\n"
+        "/unban [@user/ID] – разбан\n"
+        "/kick [@user/ID] – кикнуть из чата\n"
+        "/status [@user/ID] – статус (варны, мут, бан)",
+        parse_mode="Markdown"
+    )
+
+# ---------- /STATUS ----------
+@dp.message(Command("status"))
+async def status_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    user = logic.get_user(target_id)
+    if not user:
+        await message.reply("❌ Пользователь не найден в базе.")
+        return
+    # user: (id, telegram_id, username, first_name, last_name, current_warns, muted_until, is_muted, banned_until, is_banned)
+    warns = user[5] if len(user) > 5 else 0
+    is_muted = user[7] if len(user) > 7 else False
+    muted_until_str = user[6] if len(user) > 6 else None
+    is_banned = user[9] if len(user) > 9 else False
+    banned_until_str = user[8] if len(user) > 8 else None
+
+    text = f"📊 *Статус {target_name}:*\n⚠️ Предупреждения: {warns}/{WARN_LIMIT}\n"
+    if is_muted and muted_until_str:
+        until = datetime.fromisoformat(muted_until_str)
+        if until > datetime.now():
+            text += f"🔇 Мут до: {until.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        else:
+            text += "🔇 Мут: истёк\n"
+    else:
+        text += "🔇 Мут: нет\n"
+    if is_banned:
+        if banned_until_str:
+            until = datetime.fromisoformat(banned_until_str)
+            if until > datetime.now():
+                text += f"🚫 Бан до: {until.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            else:
+                text += "🚫 Бан: истёк\n"
+        else:
+            text += "🚫 Бан: навсегда\n"
+    else:
+        text += "🚫 Бан: нет\n"
+    await message.reply(text, parse_mode="Markdown")
+
+# ---------- КОМАНДЫ МОДЕРАЦИИ ----------
+@dp.message(Command("warn"))
+async def warn_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    if target_id == message.from_user.id:
+        await message.reply("❌ Нельзя выдать предупреждение самому себе.")
+        return
+    if target_id == OWNER_ID:
+        await message.reply("❌ Нельзя выдать предупреждение владельцу бота.")
+        return
+    warns = logic.add_warn(target_id, "Выдано администратором", admin_id=message.from_user.id)
+    await message.reply(f"⚠️ {target_name} получил предупреждение. Теперь {warns}/{WARN_LIMIT}.")
+    if warns >= WARN_LIMIT:
+        until = logic.mute_user(target_id, minutes=MUTE_MINUTES, reason="Превышен лимит предупреждений", admin_id=message.from_user.id)
+        await message.reply(f"🚫 {target_name} получил {warns} предупреждений и замьючен до {until.strftime('%Y-%m-%d %H:%M:%S')}.")
+
+@dp.message(Command("warns"))
+async def warns_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    warns = logic.get_user_warns(target_id)
+    await message.reply(f"📊 У {target_name} предупреждений: {warns}/{WARN_LIMIT}.")
+
+@dp.message(Command("mute"))
+async def mute_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    args = message.text.split()
+    minutes = MUTE_MINUTES
+    if len(args) >= 2:
+        try:
+            minutes = int(args[1])
+        except:
+            pass
+    until = logic.mute_user(target_id, minutes=minutes, reason="Мут по команде", admin_id=message.from_user.id)
+    await message.reply(f"🔇 {target_name} замьючен до {until.strftime('%Y-%m-%d %H:%M:%S')}.")
+
+@dp.message(Command("unmute"))
+async def unmute_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    logic.unmute_user(target_id, admin_id=message.from_user.id)
+    await message.reply(f"✅ {target_name} размьючен.")
+
+@dp.message(Command("ban"))
+async def ban_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    args = message.text.split()
+    minutes = None
+    if len(args) >= 2:
+        try:
+            minutes = int(args[1])
+        except:
+            minutes = None
+    logic.ban_user(target_id, minutes=minutes, reason="Бан по команде", admin_id=message.from_user.id)
+    await message.reply(f"🚫 {target_name} забанен." + (f" на {minutes} минут." if minutes else " навсегда."))
+    try:
+        await bot.ban_chat_member(message.chat.id, target_id)
+    except:
+        pass
+
+@dp.message(Command("unban"))
+async def unban_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    logic.unban_user(target_id, admin_id=message.from_user.id)
+    try:
+        await bot.unban_chat_member(message.chat.id, target_id)
+    except:
+        pass
+    await message.reply(f"✅ {target_name} разбанен.")
+
+@dp.message(Command("kick"))
+async def kick_cmd(message: Message):
+    if not await is_admin_or_owner(message.chat.id, message.from_user.id):
+        await message.reply("❌ Недостаточно прав.")
+        return
+    target_id, target_name = await get_target_user(message)
+    if not target_id:
+        return
+    try:
+        await bot.ban_chat_member(message.chat.id, target_id)
+        await bot.unban_chat_member(message.chat.id, target_id)
+        await message.reply(f"👢 {target_name} кикнут из чата.")
+    except Exception as e:
+        await message.reply(f"❌ Ошибка: {e}")
+
+# ---------- ЗАПУСК ----------
+async def main():
+    logic.init_db()
+    print("Бот запущен. Обрабатываются только команды, автоудаление сообщений отключено.")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
